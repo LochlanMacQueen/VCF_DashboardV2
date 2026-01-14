@@ -383,6 +383,19 @@ h1, h2, h3 {
 .link-btn:hover {
   text-decoration: underline;
 }
+.login-msg {
+  min-height: 18px;
+  font-size: 13px;
+  margin-bottom: 6px;
+}
+
+.login-msg.error {
+  color: #b91c1c;
+}
+
+.login-msg.success {
+  color: #15803d;
+}
 
     
   

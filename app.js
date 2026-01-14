@@ -65,43 +65,103 @@ async function fetchPrices(symbols) {
 
   
 // 3. Login UI
-function renderLogin() {
+function renderLogin(mode = "login") {
+  const isCreate = mode === "create";
+
   app.innerHTML = `
     <div class="login-wrapper">
       <div class="login-card">
         <h2>Varsity Capital</h2>
-        <p class="login-subtitle">Sign in to your dashboard</p>
+        <p class="login-subtitle">
+          ${isCreate ? "Create your account" : "Sign in to your dashboard"}
+        </p>
+
+        <div class="login-msg" id="loginMsg"></div>
 
         <input id="email" placeholder="Email" />
         <input id="password" type="password" placeholder="Password" />
-        <button id="loginBtn">Login</button>
 
-        <button class="link-btn" id="forgotBtn">Forgot password</button>
+        ${
+          isCreate
+            ? `<input id="password2" type="password" placeholder="Confirm password" />`
+            : ""
+        }
+
+        <button id="primaryBtn">
+          ${isCreate ? "Create account" : "Login"}
+        </button>
+
+        ${
+          isCreate
+            ? `<button class="link-btn" id="backBtn">Already have an account?</button>`
+            : `
+              <button class="link-btn" id="forgotBtn">Forgot password</button>
+              <button class="link-btn" id="createBtn">Create account</button>
+            `
+        }
       </div>
     </div>
   `;
 
-  document.getElementById("loginBtn").onclick = async () => {
-    const email = document.getElementById("email").value;
-    const password = document.getElementById("password").value;
-
-    const { error } = await supa.auth.signInWithPassword({ email, password });
-    if (error) alert(error.message);
-    else init();
+  const msg = (text, type = "info") => {
+    const el = document.getElementById("loginMsg");
+    el.textContent = text;
+    el.className = `login-msg ${type}`;
   };
 
-  document.getElementById("forgotBtn").onclick = async () => {
-    const email = document.getElementById("email").value;
-    if (!email) return alert("Enter your email first.");
+  const email = () => document.getElementById("email").value;
+  const pass = () => document.getElementById("password").value;
 
-    const { error } = await supa.auth.resetPasswordForEmail(email, {
-      redirectTo: window.location.origin
-    });
+  if (isCreate) {
+    document.getElementById("primaryBtn").onclick = async () => {
+      const p1 = pass();
+      const p2 = document.getElementById("password2").value;
 
-    if (error) alert(error.message);
-    else alert("Password reset email sent.");
-  };
+      if (p1 !== p2) {
+        msg("Passwords do not match.", "error");
+        return;
+      }
+
+      const { error } = await supa.auth.signUp({
+        email: email(),
+        password: p1
+      });
+
+      if (error) msg(error.message, "error");
+      else msg("Account created. Check your email for confirmation", "success");
+    };
+
+    document.getElementById("backBtn").onclick = () => renderLogin("login");
+  } else {
+    document.getElementById("primaryBtn").onclick = async () => {
+      const { error } = await supa.auth.signInWithPassword({
+        email: email(),
+        password: pass()
+      });
+
+      if (error) msg(error.message, "error");
+      else init();
+    };
+
+    document.getElementById("forgotBtn").onclick = async () => {
+      const e = email();
+      if (!e) {
+        msg("Enter your email first.", "error");
+        return;
+      }
+
+      const { error } = await supa.auth.resetPasswordForEmail(e, {
+        redirectTo: window.location.origin
+      });
+
+      if (error) msg(error.message, "error");
+      else msg("Password reset email sent.", "success");
+    };
+
+    document.getElementById("createBtn").onclick = () => renderLogin("create");
+  }
 }
+
 
   
 function renderLayout(label = "Your Account") {
@@ -171,7 +231,33 @@ async function renderDashboard() {
     }
   
     const myAccount = accounts.find(a => a.owner_user_id === user.id);
-    const displayName = myAccount ? myAccount.name : "Your Account";
+
+if (!myAccount) {
+  app.innerHTML = `
+    <div class="login-wrapper">
+      <div class="login-card">
+        <h2>Account not linked</h2>
+        <p class="login-subtitle">
+          Your login exists, but you have not been assigned an account yet.
+        </p>
+        <p style="font-size:13px;color:#64748b">
+          Please contact the fund administrator.
+        </p>
+        <button id="logoutBtn">Sign out</button>
+      </div>
+    </div>
+  `;
+
+  document.getElementById("logoutBtn").onclick = async () => {
+    await supa.auth.signOut();
+    init();
+  };
+
+  return;
+}
+
+const displayName = myAccount.name || "Your Account";
+
   
     renderLayout(displayName);
   
