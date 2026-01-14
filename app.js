@@ -205,8 +205,9 @@ function renderLayout(label = "Your Account") {
   
 
 // 4. Dashboard UI
+
 async function renderDashboard() {
-    app.innerHTML = `
+  app.innerHTML = `
   <div class="loading-screen">
     <div class="loading-card">
       <div class="spinner"></div>
@@ -215,7 +216,6 @@ async function renderDashboard() {
   </div>
 `;
 
-async function renderDashboard() {
   const { data: { user } } = await supa.auth.getUser();
 
   if (!user) {
@@ -402,7 +402,7 @@ for (const h of enrichedHoldings) {
   sectorTotals[h.sector] =
     (sectorTotals[h.sector] || 0) + h.marketValue;
 }
-}
+
 
 
 const labels = Object.keys(sectorTotals);
@@ -447,10 +447,6 @@ new Chart(ctx, {
       }
     }
   });
-  
-
-
-
-
 }
+
 setTimeout(init, 120000); // re-run auth gate + refresh
