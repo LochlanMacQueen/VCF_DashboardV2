@@ -47,15 +47,19 @@ async function fetchPrices(symbols) {
 
   for (const sym of symbols) {
     if (sym === "CASH") {
-      results[sym] = 1;
+      results[sym] = { price: 1, prevClose: 1 };
       continue;
     }
+    
 
     const res = await fetch(
       `https://finnhub.io/api/v1/quote?symbol=${sym}&token=${FINNHUB_KEY}`
     );
     const data = await res.json();
-    results[sym] = data.c;
+    results[sym] = {
+      price: data.c,
+      prevClose: data.pc
+    };    
   }
 
   priceCache = results;
@@ -291,8 +295,11 @@ const displayName = myAccount.name || "Your Account";
 
   
     const enrichedHoldings = holdings.map(h => {
-      const price = prices[h.symbol] ?? 0;
+      const priceObj = prices[h.symbol] ?? { price: 0, prevClose: 0 };
+      const price = priceObj.price;
+      const prevClose = priceObj.prevClose;
       const marketValue = Number(h.shares) * price;
+      const prevValue = Number(h.shares) * prevClose;
       const costValue = Number(h.shares) * Number(h.cost_basis);
       const pnl = marketValue - costValue;
   
@@ -301,7 +308,9 @@ const displayName = myAccount.name || "Your Account";
         price,
         marketValue,
         costValue,
-        pnl
+        pnl,
+        prevClose,
+        prevValue
       };
     });
   
@@ -309,6 +318,18 @@ const displayName = myAccount.name || "Your Account";
       (s, h) => s + h.marketValue,
       0
     );
+    const prevFundValue = enrichedHoldings.reduce(
+      (s, h) => s + (h.prevValue ?? 0),
+      0
+    );
+    
+    const dayPLPct =
+      prevFundValue > 0
+        ? (fundValue - prevFundValue) / prevFundValue
+        : 0;
+    
+    const dayPLDollar = fundValue - prevFundValue;
+    
   
     const totalUnits = accounts.reduce(
       (s, a) => s + Number(a.units),
@@ -330,6 +351,12 @@ const displayName = myAccount.name || "Your Account";
       <p>Total Value: $${fundValue.toFixed(2)}</p>
       <p>Total Units: ${totalUnits.toFixed(2)}</p>
       <p>NAV: $${nav.toFixed(2)}</p>
+      <div class="day-pl">
+      <p>Day P/L: </p>
+      <p style="color:${dayPLPct >= 0 ? "green" : "red"}">
+      ${dayPLPct >= 0 ? "+" : ""}${(dayPLPct * 100).toFixed(2)}%
+      </p>
+      </div>
     `;
 // Holdings table
     const holdingsRows = enrichedHoldings
