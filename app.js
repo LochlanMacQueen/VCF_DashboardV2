@@ -21,7 +21,6 @@ const AppState = {
   account: null,
   role: 'investor', // investor | member | admin
   currentTab: 'overview',
-  viewMode: 'member', // member | admin (toggle for admins)
 
   // Data cache
   accounts: [],
@@ -46,7 +45,13 @@ const AppState = {
 
   // Charts
   sectorChart: null,
-  benchmarkChart: null
+  benchmarkChart: null,
+
+  // Chat
+  channels: [],
+  currentChannelId: null,
+  chatMessages: {},  // { channelId: [messages] }
+  chatSubscription: null
 };
 
 // ============================================
@@ -199,7 +204,8 @@ async function loadAllData() {
     { data: pitches },
     { data: votes },
     { data: resources },
-    { data: benchmarkData }
+    { data: benchmarkData },
+    { data: channels }
   ] = await Promise.all([
     supa.from("accounts").select("*"),
     supa.from("holdings").select("*"),
@@ -207,7 +213,8 @@ async function loadAllData() {
     supa.from("pitches").select("*").order('pitch_date', { ascending: false }),
     supa.from("votes").select("*"),
     supa.from("resources").select("*").order('category'),
-    supa.from("benchmark_data").select("*").order('date')
+    supa.from("benchmark_data").select("*").order('date'),
+    supa.from("channels").select("*").order('created_at')
   ]);
 
   AppState.accounts = accounts || [];
@@ -217,6 +224,7 @@ async function loadAllData() {
   AppState.votes = votes || [];
   AppState.resources = resources || [];
   AppState.benchmarkData = benchmarkData || [];
+  AppState.channels = channels || [];
 
   // Enrich holdings with prices
   const symbols = [...new Set(AppState.holdings.map(h => h.symbol))];
@@ -483,9 +491,8 @@ function renderLayout() {
   const role = AppState.role;
   const isAdmin = role === 'admin';
   const isMember = role === 'member' || isAdmin;
-  const showAdminTabs = isAdmin && AppState.viewMode === 'admin';
 
-  const navItems = getNavItems(role, showAdminTabs);
+  const navItems = getNavItems(role, isAdmin);
 
   app.innerHTML = `
     <!-- Mobile Header -->
@@ -508,7 +515,7 @@ function renderLayout() {
         <nav class="nav flex-column py-2">
           ${navItems}
         </nav>
-        ${renderSidebarFooter(isAdmin)}
+        ${renderSidebarFooter()}
       </div>
     </div>
 
@@ -522,7 +529,7 @@ function renderLayout() {
         <nav class="nav flex-column py-2 flex-grow-1">
           ${navItems}
         </nav>
-        ${renderSidebarFooter(isAdmin)}
+        ${renderSidebarFooter()}
       </aside>
 
       <!-- Main Content -->
@@ -534,7 +541,6 @@ function renderLayout() {
 
   // Setup event listeners
   setupNavListeners();
-  setupAdminToggle();
 
   // Render current tab
   handleRouteChange();
@@ -553,6 +559,7 @@ function getNavItems(role, showAdminTabs) {
     items += navItem('analytics', 'graph-up', 'Analytics');
     items += navItem('meetings', 'calendar-event', 'Meeting History');
     items += navItem('pitches', 'lightbulb', 'Stock Pitches');
+    items += navItem('chat', 'chat-dots', 'Chat');
     items += navItem('resources', 'book', 'Educational Resources');
     items += navItem('account', 'person-circle', 'Account Management');
   } else {
@@ -565,7 +572,6 @@ function getNavItems(role, showAdminTabs) {
 
   if (showAdminTabs) {
     items += `<div class="nav-divider my-2 mx-3 border-top border-light border-opacity-25"></div>`;
-    items += navItem('admin', 'gear', 'Admin Dashboard');
     items += navItem('votes', 'check2-square', 'Vote Management');
     items += navItem('data-tools', 'database', 'Data Tools');
   }
@@ -590,22 +596,16 @@ function navItemDisabled(label) {
   `;
 }
 
-function renderSidebarFooter(isAdmin) {
+function renderSidebarFooter() {
   const name = AppState.account?.name || 'User';
   const profilePic = renderProfilePicture(AppState.account, 'sm');
 
   return `
     <div class="sidebar-footer mt-auto p-3 border-top border-light border-opacity-25">
-      <div class="d-flex align-items-center mb-2">
+      <div class="d-flex align-items-center mb-3">
         ${profilePic}
         <span class="text-white ms-2 small">${name}</span>
       </div>
-      ${isAdmin ? `
-        <div class="form-check form-switch mb-2">
-          <input class="form-check-input admin-toggle" type="checkbox" ${AppState.viewMode === 'admin' ? 'checked' : ''}>
-          <label class="form-check-label text-white-75 small">Admin View</label>
-        </div>
-      ` : ''}
       <button class="btn btn-sm btn-outline-light w-100" id="logoutBtnSidebar">
         <i class="bi bi-box-arrow-left me-1"></i>Sign out
       </button>
@@ -650,31 +650,6 @@ function setupNavListeners() {
   });
 }
 
-function setupAdminToggle() {
-  document.querySelectorAll('.admin-toggle').forEach(toggle => {
-    toggle.onchange = () => {
-      AppState.viewMode = toggle.checked ? 'admin' : 'member';
-
-      // Close offcanvas and clean up Bootstrap state before re-render
-      const offcanvasEl = document.getElementById('mobileSidebar');
-      if (offcanvasEl) {
-        const offcanvas = bootstrap.Offcanvas.getInstance(offcanvasEl);
-        if (offcanvas) {
-          offcanvas.hide();
-        }
-      }
-      // Remove any leftover Bootstrap modal/offcanvas classes from body
-      document.body.classList.remove('overflow-hidden');
-      document.body.style.overflow = '';
-      document.body.style.paddingRight = '';
-
-      // Remove any backdrop
-      document.querySelectorAll('.offcanvas-backdrop').forEach(el => el.remove());
-
-      renderLayout();
-    };
-  });
-}
 
 // ============================================
 // RENDER: TAB CONTENT
@@ -689,16 +664,22 @@ function renderCurrentTab() {
   const isMember = role === 'member' || role === 'admin';
   const isAdmin = role === 'admin';
 
+  // Clean up chat subscription when leaving chat tab
+  if (AppState.chatSubscription && tab !== 'chat') {
+    supa.removeChannel(AppState.chatSubscription);
+    AppState.chatSubscription = null;
+  }
+
   // Check permissions
-  const memberTabs = ['analytics', 'meetings', 'pitches', 'resources', 'account'];
-  const adminTabs = ['admin', 'votes', 'data-tools'];
+  const memberTabs = ['analytics', 'meetings', 'pitches', 'chat', 'resources', 'account'];
+  const adminTabs = ['votes', 'data-tools'];
 
   if (memberTabs.includes(tab) && !isMember) {
     main.innerHTML = renderAccessDenied();
     return;
   }
 
-  if (adminTabs.includes(tab) && (!isAdmin || AppState.viewMode !== 'admin')) {
+  if (adminTabs.includes(tab) && !isAdmin) {
     main.innerHTML = renderAccessDenied();
     return;
   }
@@ -716,14 +697,14 @@ function renderCurrentTab() {
     case 'pitches':
       renderPitchesTab(main);
       break;
+    case 'chat':
+      renderChatTab(main);
+      break;
     case 'resources':
       renderResourcesTab(main);
       break;
     case 'account':
       renderAccountTab(main);
-      break;
-    case 'admin':
-      renderAdminDashboard(main);
       break;
     case 'votes':
       renderVoteManagement(main);
@@ -762,14 +743,13 @@ function renderOverviewTab(main) {
       <div class="row g-4">
         <!-- Your Account Card -->
         <div class="col-lg-6 col-xl-4">
-          <div class="card h-100">
+          <div class="card">
             <div class="card-body">
               <h5 class="card-title mb-3">Your Account</h5>
               <div class="d-flex align-items-center mb-3">
                 ${renderProfilePicture(account, 'lg')}
                 <div class="ms-3">
-                  <h6 class="mb-1">${account?.name || 'User'}</h6>
-                  <span class="badge bg-${getRoleBadgeColor(AppState.role)}">${AppState.role}</span>
+                  <h6 class="mb-0">${account?.name || 'User'}</h6>
                 </div>
               </div>
               <div class="row text-center border-top pt-3">
@@ -788,7 +768,7 @@ function renderOverviewTab(main) {
 
         <!-- Fund Summary Card -->
         <div class="col-lg-6 col-xl-4">
-          <div class="card h-100">
+          <div class="card">
             <div class="card-body">
               <h5 class="card-title mb-3">Fund Summary</h5>
               <div class="mb-2 d-flex justify-content-between">
@@ -984,14 +964,6 @@ function renderSectorChart() {
       }
     }
   });
-}
-
-function getRoleBadgeColor(role) {
-  switch (role) {
-    case 'admin': return 'danger';
-    case 'member': return 'primary';
-    default: return 'secondary';
-  }
 }
 
 // ============================================
@@ -1229,7 +1201,7 @@ function renderBenchmarkChart() {
 
 function renderMeetingsTab(main) {
   const { meetings, role } = AppState;
-  const isAdmin = role === 'admin' && AppState.viewMode === 'admin';
+  const isAdmin = role === 'admin';
 
   main.innerHTML = `
     <div class="container-fluid py-4">
@@ -1416,7 +1388,7 @@ function renderMeetingsTab(main) {
 
 function renderPitchesTab(main) {
   const { pitches, votes, role, account, nav } = AppState;
-  const isAdmin = role === 'admin' && AppState.viewMode === 'admin';
+  const isAdmin = role === 'admin';
   const canVote = isVotingEligible(account, nav);
 
   main.innerHTML = `
@@ -1693,12 +1665,395 @@ function getStatusBadgeColor(status) {
 }
 
 // ============================================
+// TAB: CHAT
+// ============================================
+
+function renderChatTab(main) {
+  const { channels, role, account } = AppState;
+  const isAdmin = role === 'admin';
+
+  // Set default channel if not set
+  if (!AppState.currentChannelId && channels.length > 0) {
+    AppState.currentChannelId = channels[0].id;
+  }
+
+  const currentChannel = channels.find(c => c.id === AppState.currentChannelId);
+  const canPost = currentChannel ? (currentChannel.admin_only_post ? isAdmin : true) : false;
+
+  main.innerHTML = `
+    <div class="container-fluid py-4 h-100">
+      <div class="row g-0 chat-container" style="height: calc(100vh - 120px);">
+        <!-- Channel Sidebar (Desktop) -->
+        <div class="col-auto d-none d-md-block">
+          <div class="chat-sidebar bg-light h-100" style="width: 200px; border-right: 1px solid #dee2e6;">
+            <div class="p-3 border-bottom">
+              <h6 class="mb-0 text-muted text-uppercase small">Channels</h6>
+            </div>
+            <div class="channel-list">
+              ${channels.map(ch => `
+                <div class="channel-item p-3 ${ch.id === AppState.currentChannelId ? 'active' : ''}"
+                     data-channel-id="${ch.id}"
+                     style="cursor: pointer; ${ch.id === AppState.currentChannelId ? 'background: var(--vcf-primary); color: white;' : ''}">
+                  ${ch.admin_only_post ? '<i class="bi bi-megaphone me-2"></i>' : '<i class="bi bi-hash me-2"></i>'}
+                  ${ch.name}
+                </div>
+              `).join('')}
+            </div>
+          </div>
+        </div>
+
+        <!-- Main Chat Area -->
+        <div class="col d-flex flex-column h-100">
+          <!-- Mobile Channel Selector -->
+          <div class="d-md-none p-3 border-bottom bg-light">
+            <select class="form-select" id="channelSelect">
+              ${channels.map(ch => `
+                <option value="${ch.id}" ${ch.id === AppState.currentChannelId ? 'selected' : ''}>
+                  ${ch.admin_only_post ? '📢 ' : '# '}${ch.name}
+                </option>
+              `).join('')}
+            </select>
+          </div>
+
+          <!-- Channel Header -->
+          <div class="chat-header p-3 border-bottom d-none d-md-block">
+            <h5 class="mb-0">
+              ${currentChannel?.admin_only_post ? '<i class="bi bi-megaphone me-2"></i>' : '<i class="bi bi-hash me-2"></i>'}
+              ${currentChannel?.name || 'Select a channel'}
+            </h5>
+            <small class="text-muted">${currentChannel?.description || ''}</small>
+          </div>
+
+          <!-- Messages Area -->
+          <div class="chat-messages flex-grow-1 p-3" id="chatMessages" style="overflow-y: auto; background: #fff;">
+            <div class="text-center text-muted py-5">
+              <div class="spinner-border spinner-border-sm me-2" role="status"></div>
+              Loading messages...
+            </div>
+          </div>
+
+          <!-- Message Input -->
+          <div class="chat-input p-3 border-top bg-white">
+            ${canPost ? `
+              <form id="chatForm" class="d-flex gap-2">
+                <input type="text"
+                       class="form-control"
+                       id="messageInput"
+                       placeholder="Type a message..."
+                       autocomplete="off"
+                       style="border-radius: 20px;" />
+                <button type="submit" class="btn btn-vcf-primary px-3" style="border-radius: 20px;">
+                  <i class="bi bi-send"></i>
+                </button>
+              </form>
+            ` : `
+              <div class="text-center text-muted py-2">
+                <i class="bi bi-lock me-2"></i>Only admins can post in this channel
+              </div>
+            `}
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  // Setup event listeners
+  setupChatEventListeners();
+
+  // Load messages for current channel
+  if (AppState.currentChannelId) {
+    loadChatMessages(AppState.currentChannelId);
+    subscribeToChatMessages(AppState.currentChannelId);
+  }
+}
+
+function setupChatEventListeners() {
+  // Desktop channel switching
+  document.querySelectorAll('.channel-item').forEach(item => {
+    item.onclick = () => {
+      const channelId = item.dataset.channelId;
+      switchChannel(channelId);
+    };
+  });
+
+  // Mobile channel switching
+  const channelSelect = document.getElementById('channelSelect');
+  if (channelSelect) {
+    channelSelect.onchange = () => {
+      switchChannel(channelSelect.value);
+    };
+  }
+
+  // Message form submission
+  const chatForm = document.getElementById('chatForm');
+  if (chatForm) {
+    chatForm.onsubmit = async (e) => {
+      e.preventDefault();
+      const input = document.getElementById('messageInput');
+      const content = input.value.trim();
+
+      if (!content) return;
+
+      input.disabled = true;
+
+      try {
+        await sendChatMessage(AppState.currentChannelId, content);
+        input.value = '';
+      } catch (error) {
+        console.error('Failed to send message:', error);
+        alert('Failed to send message. Please try again.');
+      } finally {
+        input.disabled = false;
+        input.focus();
+      }
+    };
+  }
+}
+
+function switchChannel(channelId) {
+  if (channelId === AppState.currentChannelId) return;
+
+  // Unsubscribe from current channel
+  if (AppState.chatSubscription) {
+    supa.removeChannel(AppState.chatSubscription);
+    AppState.chatSubscription = null;
+  }
+
+  AppState.currentChannelId = channelId;
+  renderChatTab(document.getElementById('main'));
+}
+
+async function loadChatMessages(channelId) {
+  const messagesContainer = document.getElementById('chatMessages');
+  if (!messagesContainer) return;
+
+  // Check if we have cached messages
+  if (AppState.chatMessages[channelId]) {
+    renderChatMessages(AppState.chatMessages[channelId]);
+    return;
+  }
+
+  try {
+    const { data: messages, error } = await supa
+      .from('messages')
+      .select('*')
+      .eq('channel_id', channelId)
+      .order('created_at', { ascending: true })
+      .limit(100);
+
+    if (error) throw error;
+
+    AppState.chatMessages[channelId] = messages || [];
+    renderChatMessages(messages || []);
+  } catch (error) {
+    console.error('Failed to load messages:', error);
+    messagesContainer.innerHTML = `
+      <div class="text-center text-danger py-5">
+        <p>Failed to load messages</p>
+        <button class="btn btn-primary btn-sm" onclick="loadChatMessages('${channelId}')">
+          Retry
+        </button>
+      </div>
+    `;
+  }
+}
+
+function renderChatMessages(messages) {
+  const messagesContainer = document.getElementById('chatMessages');
+  if (!messagesContainer) return;
+
+  if (messages.length === 0) {
+    messagesContainer.innerHTML = `
+      <div class="text-center text-muted py-5">
+        <i class="bi bi-chat-dots fs-1 mb-3 d-block"></i>
+        <p>No messages yet. Start the conversation!</p>
+      </div>
+    `;
+    return;
+  }
+
+  let html = '';
+  let lastUserId = null;
+
+  messages.forEach((msg, index) => {
+    const isNewUser = msg.user_id !== lastUserId;
+    const time = new Date(msg.created_at).toLocaleTimeString('en-US', {
+      hour: 'numeric',
+      minute: '2-digit',
+      hour12: true
+    });
+
+    if (isNewUser) {
+      const avatar = msg.user_avatar
+        ? `<img src="${msg.user_avatar}" class="rounded-circle" width="36" height="36" alt="${msg.user_name}" />`
+        : `<div class="rounded-circle d-flex align-items-center justify-content-center text-white"
+               style="width: 36px; height: 36px; background: #6b7280; font-size: 14px; font-weight: bold;">
+             ${getInitials(msg.user_name)}
+           </div>`;
+
+      html += `
+        <div class="message-group mb-3">
+          <div class="d-flex align-items-start">
+            <div class="me-2 flex-shrink-0">${avatar}</div>
+            <div class="flex-grow-1">
+              <div class="d-flex align-items-baseline gap-2 mb-1">
+                <strong style="font-size: 14px;">${escapeHtml(msg.user_name)}</strong>
+                <span class="text-muted" style="font-size: 12px;">${time}</span>
+              </div>
+              <div class="message-content" style="font-size: 15px; white-space: pre-wrap; word-wrap: break-word;">
+                ${escapeHtml(msg.content)}
+              </div>
+            </div>
+          </div>
+        </div>
+      `;
+    } else {
+      // Same user, add message without avatar/name
+      html += `
+        <div class="message-continuation mb-1" style="margin-left: 44px;">
+          <div class="message-content" style="font-size: 15px; white-space: pre-wrap; word-wrap: break-word;">
+            ${escapeHtml(msg.content)}
+          </div>
+        </div>
+      `;
+    }
+
+    lastUserId = msg.user_id;
+  });
+
+  messagesContainer.innerHTML = html;
+  scrollChatToBottom();
+}
+
+function scrollChatToBottom() {
+  const messagesContainer = document.getElementById('chatMessages');
+  if (messagesContainer) {
+    messagesContainer.scrollTo({
+      top: messagesContainer.scrollHeight,
+      behavior: 'smooth'
+    });
+  }
+}
+
+function subscribeToChatMessages(channelId) {
+  // Clean up existing subscription
+  if (AppState.chatSubscription) {
+    supa.removeChannel(AppState.chatSubscription);
+  }
+
+  AppState.chatSubscription = supa
+    .channel(`messages:${channelId}`)
+    .on(
+      'postgres_changes',
+      {
+        event: 'INSERT',
+        schema: 'public',
+        table: 'messages',
+        filter: `channel_id=eq.${channelId}`
+      },
+      (payload) => {
+        const newMessage = payload.new;
+
+        // Add to cache
+        if (!AppState.chatMessages[channelId]) {
+          AppState.chatMessages[channelId] = [];
+        }
+        AppState.chatMessages[channelId].push(newMessage);
+
+        // Append to UI
+        appendChatMessage(newMessage);
+        scrollChatToBottom();
+      }
+    )
+    .subscribe();
+}
+
+function appendChatMessage(message) {
+  const messagesContainer = document.getElementById('chatMessages');
+  if (!messagesContainer) return;
+
+  // Check if this is from a different user than the last message
+  const messages = AppState.chatMessages[AppState.currentChannelId] || [];
+  const prevMessage = messages.length > 1 ? messages[messages.length - 2] : null;
+  const isNewUser = !prevMessage || prevMessage.user_id !== message.user_id;
+
+  const time = new Date(message.created_at).toLocaleTimeString('en-US', {
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true
+  });
+
+  // Remove empty state if present
+  const emptyState = messagesContainer.querySelector('.text-center.text-muted');
+  if (emptyState && emptyState.textContent.includes('No messages')) {
+    messagesContainer.innerHTML = '';
+  }
+
+  const messageHtml = document.createElement('div');
+
+  if (isNewUser) {
+    const avatar = message.user_avatar
+      ? `<img src="${message.user_avatar}" class="rounded-circle" width="36" height="36" alt="${message.user_name}" />`
+      : `<div class="rounded-circle d-flex align-items-center justify-content-center text-white"
+             style="width: 36px; height: 36px; background: #6b7280; font-size: 14px; font-weight: bold;">
+           ${getInitials(message.user_name)}
+         </div>`;
+
+    messageHtml.className = 'message-group mb-3 chat-message-new';
+    messageHtml.innerHTML = `
+      <div class="d-flex align-items-start">
+        <div class="me-2 flex-shrink-0">${avatar}</div>
+        <div class="flex-grow-1">
+          <div class="d-flex align-items-baseline gap-2 mb-1">
+            <strong style="font-size: 14px;">${escapeHtml(message.user_name)}</strong>
+            <span class="text-muted" style="font-size: 12px;">${time}</span>
+          </div>
+          <div class="message-content" style="font-size: 15px; white-space: pre-wrap; word-wrap: break-word;">
+            ${escapeHtml(message.content)}
+          </div>
+        </div>
+      </div>
+    `;
+  } else {
+    messageHtml.className = 'message-continuation mb-1 chat-message-new';
+    messageHtml.style.marginLeft = '44px';
+    messageHtml.innerHTML = `
+      <div class="message-content" style="font-size: 15px; white-space: pre-wrap; word-wrap: break-word;">
+        ${escapeHtml(message.content)}
+      </div>
+    `;
+  }
+
+  messagesContainer.appendChild(messageHtml);
+}
+
+async function sendChatMessage(channelId, content) {
+  const { error } = await supa
+    .from('messages')
+    .insert({
+      channel_id: channelId,
+      user_id: AppState.user.id,
+      user_name: AppState.account.name,
+      user_avatar: AppState.account.profile_picture_url || null,
+      content: content.trim()
+    });
+
+  if (error) throw error;
+}
+
+function escapeHtml(text) {
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+// ============================================
 // TAB: RESOURCES
 // ============================================
 
 function renderResourcesTab(main) {
   const { resources, role } = AppState;
-  const isAdmin = role === 'admin' && AppState.viewMode === 'admin';
+  const isAdmin = role === 'admin';
 
   // Group by category
   const grouped = resources.reduce((acc, r) => {
@@ -1854,7 +2209,7 @@ function renderResourcesTab(main) {
 
 function renderAccountTab(main) {
   const { account, accounts, role, nav, fundValue } = AppState;
-  const isAdmin = role === 'admin' && AppState.viewMode === 'admin';
+  const isAdmin = role === 'admin';
 
   main.innerHTML = `
     <div class="container-fluid py-4">
@@ -1885,11 +2240,6 @@ function renderAccountTab(main) {
               <div class="mb-3">
                 <label class="form-label text-muted small">Email</label>
                 <p class="mb-0">${AppState.user?.email || '-'}</p>
-              </div>
-
-              <div class="mb-3">
-                <label class="form-label text-muted small">Role</label>
-                <p class="mb-0"><span class="badge bg-${getRoleBadgeColor(role)}">${role}</span></p>
               </div>
 
               <div class="row">
@@ -1929,7 +2279,7 @@ function renderAccountTab(main) {
                             ${renderProfilePicture(a, 'sm')}
                             <span class="ms-2">${a.name}</span>
                           </td>
-                          <td><span class="badge bg-${getRoleBadgeColor(a.role)}">${a.role || 'investor'}</span></td>
+                          <td class="text-muted">${a.role || 'investor'}</td>
                           <td class="text-end">${(Number(a.units) || 0).toFixed(2)}</td>
                           <td class="text-end">
                             <button class="btn btn-sm btn-link" onclick="window.editAccount('${a.id}')">
@@ -2058,114 +2408,6 @@ function renderAccountTab(main) {
       renderAccountTab(document.getElementById('main'));
     };
   }
-}
-
-// ============================================
-// TAB: ADMIN DASHBOARD
-// ============================================
-
-function renderAdminDashboard(main) {
-  const { pitches, votes, accounts, holdings } = AppState;
-
-  const openVotingPitches = pitches.filter(p => p.voting_open);
-  const pendingPitches = pitches.filter(p => p.status === 'pending');
-
-  main.innerHTML = `
-    <div class="container-fluid py-4">
-      <h4 class="mb-4"><i class="bi bi-gear me-2"></i>Admin Dashboard</h4>
-
-      <div class="row g-4">
-        <!-- Quick Stats -->
-        <div class="col-md-6 col-xl-3">
-          <div class="card bg-vcf-primary text-white">
-            <div class="card-body">
-              <h6 class="text-white-50 mb-2">Total Accounts</h6>
-              <h3>${accounts.length}</h3>
-            </div>
-          </div>
-        </div>
-        <div class="col-md-6 col-xl-3">
-          <div class="card">
-            <div class="card-body">
-              <h6 class="text-muted mb-2">Active Positions</h6>
-              <h3>${holdings.filter(h => h.symbol !== 'CASH').length}</h3>
-            </div>
-          </div>
-        </div>
-        <div class="col-md-6 col-xl-3">
-          <div class="card">
-            <div class="card-body">
-              <h6 class="text-muted mb-2">Open Votes</h6>
-              <h3>${openVotingPitches.length}</h3>
-            </div>
-          </div>
-        </div>
-        <div class="col-md-6 col-xl-3">
-          <div class="card">
-            <div class="card-body">
-              <h6 class="text-muted mb-2">Pending Pitches</h6>
-              <h3>${pendingPitches.length}</h3>
-            </div>
-          </div>
-        </div>
-
-        <!-- Quick Actions -->
-        <div class="col-lg-6">
-          <div class="card h-100">
-            <div class="card-body">
-              <h5 class="card-title mb-4">Quick Actions</h5>
-              <div class="d-grid gap-2">
-                <a href="#pitches" class="btn btn-outline-primary text-start">
-                  <i class="bi bi-plus-circle me-2"></i>Add New Pitch
-                </a>
-                <a href="#meetings" class="btn btn-outline-primary text-start">
-                  <i class="bi bi-calendar-plus me-2"></i>Record Meeting
-                </a>
-                <a href="#data-tools" class="btn btn-outline-primary text-start">
-                  <i class="bi bi-plus-square me-2"></i>Add Position
-                </a>
-                <a href="#votes" class="btn btn-outline-primary text-start">
-                  <i class="bi bi-check2-square me-2"></i>Manage Votes
-                </a>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <!-- Active Votes Summary -->
-        <div class="col-lg-6">
-          <div class="card h-100 admin-terminal">
-            <div class="card-body">
-              <h5 class="card-title mb-4">Active Votes</h5>
-              ${openVotingPitches.length === 0 ? `
-                <p class="text-muted">No active votes</p>
-              ` : `
-                ${openVotingPitches.map(p => {
-                  const pitchVotes = votes.filter(v => v.pitch_id === p.id);
-                  const yesVotes = pitchVotes.filter(v => v.vote_type === 'yes').length;
-                  const noVotes = pitchVotes.filter(v => v.vote_type === 'no').length;
-
-                  return `
-                    <div class="mb-3 pb-3 border-bottom">
-                      <div class="d-flex justify-content-between align-items-center mb-2">
-                        <strong>${p.ticker}</strong>
-                        <span class="badge bg-success">Voting Open</span>
-                      </div>
-                      <div class="d-flex gap-3 small">
-                        <span class="text-success">Yes: ${yesVotes}</span>
-                        <span class="text-danger">No: ${noVotes}</span>
-                        <span class="text-muted">Total: ${pitchVotes.length}</span>
-                      </div>
-                    </div>
-                  `;
-                }).join('')}
-              `}
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  `;
 }
 
 // ============================================

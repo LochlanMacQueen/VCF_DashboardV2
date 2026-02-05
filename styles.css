@@ -416,6 +416,62 @@ body {
 }
 
 /* ============================================
+   CHAT STYLES
+   ============================================ */
+
+.chat-container {
+  max-height: calc(100vh - 120px);
+}
+
+.chat-sidebar .channel-item {
+  transition: background-color 0.15s ease;
+}
+
+.chat-sidebar .channel-item:hover:not(.active) {
+  background-color: #e9ecef;
+}
+
+.chat-sidebar .channel-item.active {
+  background: var(--vcf-primary);
+  color: white;
+}
+
+.chat-messages {
+  scroll-behavior: smooth;
+}
+
+.chat-message-new {
+  animation: fadeIn 0.2s ease;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Mobile chat adjustments */
+@media (max-width: 767.98px) {
+  .chat-container {
+    height: calc(100vh - 140px) !important;
+  }
+
+  .chat-messages {
+    height: calc(100vh - 280px) !important;
+  }
+
+  .chat-input {
+    position: sticky;
+    bottom: 0;
+  }
+}
+
+/* ============================================
    PRINT STYLES
    ============================================ */
 

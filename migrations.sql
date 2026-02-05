@@ -282,3 +282,94 @@ CREATE POLICY "Admins can manage benchmark data" ON benchmark_data
 -- Sample pitch
 -- INSERT INTO pitches (ticker, pitched_by, pitch_date, summary, sector, status, voting_open) VALUES
 -- ('AAPL', 'John Doe', '2024-01-20', 'Strong services growth and margin expansion', 'Technology', 'pending', true);
+
+-- ============================================
+-- PHASE 5: CHAT FEATURE
+-- ============================================
+
+-- Channels table
+CREATE TABLE IF NOT EXISTS channels (
+    id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT,
+    admin_only_post BOOLEAN DEFAULT false,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Messages table
+CREATE TABLE IF NOT EXISTS messages (
+    id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+    channel_id UUID REFERENCES channels(id) ON DELETE CASCADE,
+    user_id UUID REFERENCES auth.users(id),
+    user_name TEXT NOT NULL,
+    user_avatar TEXT,
+    content TEXT NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Create indexes for performance
+CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages(channel_id);
+CREATE INDEX IF NOT EXISTS idx_messages_created ON messages(created_at DESC);
+
+-- Insert default channels
+INSERT INTO channels (name, description, admin_only_post) VALUES
+    ('General', 'Open discussion for all members', false),
+    ('Announcements', 'Important updates from admins', true)
+ON CONFLICT DO NOTHING;
+
+-- Enable RLS on chat tables
+ALTER TABLE channels ENABLE ROW LEVEL SECURITY;
+ALTER TABLE messages ENABLE ROW LEVEL SECURITY;
+
+-- Channels: Members can read all channels
+CREATE POLICY "Members can read channels" ON channels
+    FOR SELECT USING (
+        EXISTS (
+            SELECT 1 FROM accounts
+            WHERE owner_user_id = auth.uid()
+            AND role IN ('member', 'admin')
+        )
+    );
+
+-- Messages: Members can read all messages
+CREATE POLICY "Members can read messages" ON messages
+    FOR SELECT USING (
+        EXISTS (
+            SELECT 1 FROM accounts
+            WHERE owner_user_id = auth.uid()
+            AND role IN ('member', 'admin')
+        )
+    );
+
+-- Messages: Members can post to General channel (non-admin-only channels)
+CREATE POLICY "Members can post to general" ON messages
+    FOR INSERT WITH CHECK (
+        EXISTS (
+            SELECT 1 FROM accounts
+            WHERE owner_user_id = auth.uid()
+            AND role IN ('member', 'admin')
+        )
+        AND
+        EXISTS (
+            SELECT 1 FROM channels
+            WHERE id = channel_id
+            AND admin_only_post = false
+        )
+    );
+
+-- Messages: Admins can post to any channel
+CREATE POLICY "Admins can post anywhere" ON messages
+    FOR INSERT WITH CHECK (
+        EXISTS (
+            SELECT 1 FROM accounts
+            WHERE owner_user_id = auth.uid()
+            AND role = 'admin'
+        )
+    );
+
+-- Messages: Users can delete their own messages
+CREATE POLICY "Users can delete own messages" ON messages
+    FOR DELETE USING (user_id = auth.uid());
+
+-- Enable Realtime for messages table
+ALTER PUBLICATION supabase_realtime ADD TABLE messages;
