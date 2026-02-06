@@ -1348,10 +1348,9 @@ function renderMeetingsTab(main) {
     document.getElementById('meetingNotes').value = meeting?.notes || '';
     document.getElementById('meetingLinks').value = meeting?.presentation_links?.join('\n') || '';
 
-    if (!id) {
-      const modal = new bootstrap.Modal(document.getElementById('meetingModal'));
-      modal.show();
-    }
+    const modalEl = document.getElementById('meetingModal');
+    const modal = bootstrap.Modal.getInstance(modalEl) || new bootstrap.Modal(modalEl);
+    modal.show();
   };
 
   window.saveMeeting = async () => {
@@ -1593,10 +1592,9 @@ function renderPitchesTab(main) {
     document.getElementById('pitchStatus').value = pitch?.status || 'pending';
     document.getElementById('pitchVotingOpen').value = pitch?.voting_open ? 'true' : 'false';
 
-    if (!id) {
-      const modal = new bootstrap.Modal(document.getElementById('pitchModal'));
-      modal.show();
-    }
+    const modalEl = document.getElementById('pitchModal');
+    const modal = bootstrap.Modal.getInstance(modalEl) || new bootstrap.Modal(modalEl);
+    modal.show();
   };
 
   window.savePitch = async () => {
@@ -1885,24 +1883,22 @@ function renderChatMessages(messages) {
 
     if (isNewUser) {
       const avatar = msg.user_avatar
-        ? `<img src="${msg.user_avatar}" class="rounded-circle" width="36" height="36" alt="${msg.user_name}" />`
+        ? `<img src="${msg.user_avatar}" class="rounded-circle" width="32" height="32" alt="${msg.user_name}" />`
         : `<div class="rounded-circle d-flex align-items-center justify-content-center text-white"
-               style="width: 36px; height: 36px; background: #6b7280; font-size: 14px; font-weight: bold;">
+               style="width: 32px; height: 32px; background: #6b7280; font-size: 12px; font-weight: bold;">
              ${getInitials(msg.user_name)}
            </div>`;
 
       html += `
-        <div class="message-group mb-3">
-          <div class="d-flex align-items-start">
-            <div class="me-2 flex-shrink-0">${avatar}</div>
-            <div class="flex-grow-1">
-              <div class="d-flex align-items-baseline gap-2 mb-1">
-                <strong style="font-size: 14px;">${escapeHtml(msg.user_name)}</strong>
-                <span class="text-muted" style="font-size: 12px;">${time}</span>
+        <div class="message-group mb-2">
+          <div class="d-flex">
+            <div class="flex-shrink-0" style="width: 40px;">${avatar}</div>
+            <div class="flex-grow-1" style="min-width: 0;">
+              <div class="d-flex align-items-baseline gap-2">
+                <span class="fw-semibold" style="font-size: 14px;">${escapeHtml(msg.user_name)}</span>
+                <span class="text-muted" style="font-size: 11px;">${time}</span>
               </div>
-              <div class="message-content" style="font-size: 15px; white-space: pre-wrap; word-wrap: break-word;">
-                ${escapeHtml(msg.content)}
-              </div>
+              <div style="font-size: 14px; line-height: 1.4; white-space: pre-wrap; word-wrap: break-word;">${escapeHtml(msg.content)}</div>
             </div>
           </div>
         </div>
@@ -1910,10 +1906,8 @@ function renderChatMessages(messages) {
     } else {
       // Same user, add message without avatar/name
       html += `
-        <div class="message-continuation mb-1" style="margin-left: 44px;">
-          <div class="message-content" style="font-size: 15px; white-space: pre-wrap; word-wrap: break-word;">
-            ${escapeHtml(msg.content)}
-          </div>
+        <div class="message-continuation" style="margin-left: 40px; margin-bottom: 2px;">
+          <div style="font-size: 14px; line-height: 1.4; white-space: pre-wrap; word-wrap: break-word;">${escapeHtml(msg.content)}</div>
         </div>
       `;
     }
@@ -1993,34 +1987,31 @@ function appendChatMessage(message) {
 
   if (isNewUser) {
     const avatar = message.user_avatar
-      ? `<img src="${message.user_avatar}" class="rounded-circle" width="36" height="36" alt="${message.user_name}" />`
+      ? `<img src="${message.user_avatar}" class="rounded-circle" width="32" height="32" alt="${message.user_name}" />`
       : `<div class="rounded-circle d-flex align-items-center justify-content-center text-white"
-             style="width: 36px; height: 36px; background: #6b7280; font-size: 14px; font-weight: bold;">
+             style="width: 32px; height: 32px; background: #6b7280; font-size: 12px; font-weight: bold;">
            ${getInitials(message.user_name)}
          </div>`;
 
-    messageHtml.className = 'message-group mb-3 chat-message-new';
+    messageHtml.className = 'message-group mb-2 chat-message-new';
     messageHtml.innerHTML = `
-      <div class="d-flex align-items-start">
-        <div class="me-2 flex-shrink-0">${avatar}</div>
-        <div class="flex-grow-1">
-          <div class="d-flex align-items-baseline gap-2 mb-1">
-            <strong style="font-size: 14px;">${escapeHtml(message.user_name)}</strong>
-            <span class="text-muted" style="font-size: 12px;">${time}</span>
+      <div class="d-flex">
+        <div class="flex-shrink-0" style="width: 40px;">${avatar}</div>
+        <div class="flex-grow-1" style="min-width: 0;">
+          <div class="d-flex align-items-baseline gap-2">
+            <span class="fw-semibold" style="font-size: 14px;">${escapeHtml(message.user_name)}</span>
+            <span class="text-muted" style="font-size: 11px;">${time}</span>
           </div>
-          <div class="message-content" style="font-size: 15px; white-space: pre-wrap; word-wrap: break-word;">
-            ${escapeHtml(message.content)}
-          </div>
+          <div style="font-size: 14px; line-height: 1.4; white-space: pre-wrap; word-wrap: break-word;">${escapeHtml(message.content)}</div>
         </div>
       </div>
     `;
   } else {
-    messageHtml.className = 'message-continuation mb-1 chat-message-new';
-    messageHtml.style.marginLeft = '44px';
+    messageHtml.className = 'message-continuation chat-message-new';
+    messageHtml.style.marginLeft = '40px';
+    messageHtml.style.marginBottom = '2px';
     messageHtml.innerHTML = `
-      <div class="message-content" style="font-size: 15px; white-space: pre-wrap; word-wrap: break-word;">
-        ${escapeHtml(message.content)}
-      </div>
+      <div style="font-size: 14px; line-height: 1.4; white-space: pre-wrap; word-wrap: break-word;">${escapeHtml(message.content)}</div>
     `;
   }
 
@@ -2169,10 +2160,9 @@ function renderResourcesTab(main) {
     document.getElementById('resourceCategory').value = resource?.category || '';
     document.getElementById('resourceDescription').value = resource?.description || '';
 
-    if (!id) {
-      const modal = new bootstrap.Modal(document.getElementById('resourceModal'));
-      modal.show();
-    }
+    const modalEl = document.getElementById('resourceModal');
+    const modal = bootstrap.Modal.getInstance(modalEl) || new bootstrap.Modal(modalEl);
+    modal.show();
   };
 
   window.saveResource = async () => {
@@ -2387,7 +2377,8 @@ function renderAccountTab(main) {
       document.getElementById('editAccountRole').value = acc.role || 'investor';
       document.getElementById('editAccountUnits').value = acc.units || 0;
 
-      const modal = new bootstrap.Modal(document.getElementById('editAccountModal'));
+      const modalEl = document.getElementById('editAccountModal');
+      const modal = bootstrap.Modal.getInstance(modalEl) || new bootstrap.Modal(modalEl);
       modal.show();
     };
 
