@@ -78,7 +78,8 @@ function stringToColor(str) {
 // Format date
 function formatDate(dateStr) {
   if (!dateStr) return '';
-  const date = new Date(dateStr);
+  const [year, month, day] = dateStr.split('-').map(Number);
+  const date = new Date(year, month - 1, day);
   return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
@@ -134,6 +135,8 @@ function formatChatTimestamp(createdAt) {
 // Check voting eligibility (balance >= $300 OR units >= 290)
 function isVotingEligible(account, nav) {
   if (!account) return false;
+  const role = account.role || 'investor';
+  if (role !== 'member' && role !== 'admin') return false;
   const units = Number(account.units) || 0;
   const balance = units * (Number(nav) || 0);
   return balance >= 300 || units >= 290;
@@ -1607,7 +1610,7 @@ function renderPitchesTab(main) {
       ${!canVote ? `
         <div class="alert alert-info mb-4">
           <i class="bi bi-info-circle me-2"></i>
-          You need a balance of $300+ or 290+ units to vote on pitches.
+          You must be a member or admin with a balance of $300+ or 290+ units to vote on pitches.
         </div>
       ` : ''}
 
