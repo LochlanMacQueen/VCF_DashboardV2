@@ -96,6 +96,41 @@ function formatPercent(value, decimals = 2) {
   return (num * 100).toFixed(decimals) + '%';
 }
 
+// Clean up any open Bootstrap modals and their backdrops
+function cleanupModals() {
+  document.querySelectorAll('.modal.show').forEach(modalEl => {
+    const instance = bootstrap.Modal.getInstance(modalEl);
+    if (instance) instance.hide();
+  });
+  document.querySelectorAll('.modal-backdrop').forEach(el => el.remove());
+  document.body.classList.remove('modal-open');
+  document.body.style.overflow = '';
+  document.body.style.paddingRight = '';
+}
+
+// Format chat timestamp with date context
+function formatChatTimestamp(createdAt) {
+  const date = new Date(createdAt);
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const msgDay = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  const diffDays = (today - msgDay) / (1000 * 60 * 60 * 24);
+
+  const timeStr = date.toLocaleTimeString('en-US', {
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true
+  });
+
+  if (diffDays < 1) {
+    return 'Today at ' + timeStr;
+  } else if (diffDays < 2) {
+    return 'Yesterday at ' + timeStr;
+  } else {
+    return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) + ' at ' + timeStr;
+  }
+}
+
 // Check voting eligibility (balance >= $300 OR units >= 290)
 function isVotingEligible(account, nav) {
   if (!account) return false;
@@ -334,6 +369,7 @@ async function handleForgotPassword(email) {
 }
 
 async function handleLogout() {
+  appReady = false;
   await supa.auth.signOut();
   AppState.user = null;
   AppState.account = null;
@@ -487,6 +523,211 @@ function renderNoAccount() {
 // RENDER: MAIN LAYOUT
 // ============================================
 
+// ============================================
+// PERSISTENT MODALS (rendered once, survive tab switches)
+// ============================================
+
+function renderPersistentModals() {
+  const container = document.getElementById('modals-container');
+  if (!container) return;
+
+  const isAdmin = AppState.role === 'admin';
+  const resources = AppState.resources;
+
+  container.innerHTML = `
+    <!-- Meeting Detail Modal (all members) -->
+    <div class="modal fade" id="meetingDetailModal" tabindex="-1">
+      <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h5 class="modal-title" id="meetingDetailTitle">Meeting Details</h5>
+            <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body" id="meetingDetailBody"></div>
+        </div>
+      </div>
+    </div>
+
+    ${isAdmin ? `
+    <!-- Add/Edit Meeting Modal -->
+    <div class="modal fade" id="meetingModal" tabindex="-1">
+      <div class="modal-dialog">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h5 class="modal-title" id="meetingModalTitle">Add Meeting</h5>
+            <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body">
+            <input type="hidden" id="meetingId" />
+            <div class="mb-3">
+              <label class="form-label">Date</label>
+              <input type="date" class="form-control" id="meetingDate" required />
+            </div>
+            <div class="mb-3">
+              <label class="form-label">Title</label>
+              <input type="text" class="form-control" id="meetingTitle" required />
+            </div>
+            <div class="mb-3">
+              <label class="form-label">Notes</label>
+              <textarea class="form-control" id="meetingNotes" rows="4"></textarea>
+            </div>
+            <div class="mb-3">
+              <label class="form-label">Presentation Links (one per line)</label>
+              <textarea class="form-control" id="meetingLinks" rows="2" placeholder="https://..."></textarea>
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+            <button type="button" class="btn btn-vcf-primary" onclick="window.saveMeeting()">Save</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Add/Edit Pitch Modal -->
+    <div class="modal fade" id="pitchModal" tabindex="-1">
+      <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h5 class="modal-title" id="pitchModalTitle">Add Pitch</h5>
+            <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body">
+            <input type="hidden" id="pitchId" />
+            <div class="row">
+              <div class="col-md-6 mb-3">
+                <label class="form-label">Ticker</label>
+                <input type="text" class="form-control" id="pitchTicker" required placeholder="AAPL" />
+              </div>
+              <div class="col-md-6 mb-3">
+                <label class="form-label">Pitched By</label>
+                <input type="text" class="form-control" id="pitchBy" required />
+              </div>
+            </div>
+            <div class="row">
+              <div class="col-md-6 mb-3">
+                <label class="form-label">Pitch Date</label>
+                <input type="date" class="form-control" id="pitchDate" required />
+              </div>
+              <div class="col-md-6 mb-3">
+                <label class="form-label">Sector</label>
+                <input type="text" class="form-control" id="pitchSector" placeholder="Technology" />
+              </div>
+            </div>
+            <div class="mb-3">
+              <label class="form-label">Summary</label>
+              <textarea class="form-control" id="pitchSummary" rows="2"></textarea>
+            </div>
+            <div class="mb-3">
+              <label class="form-label">Thesis</label>
+              <textarea class="form-control" id="pitchThesis" rows="4"></textarea>
+            </div>
+            <div class="mb-3">
+              <label class="form-label">Slideshow URL</label>
+              <input type="url" class="form-control" id="pitchSlideshow" placeholder="https://..." />
+            </div>
+            <div class="row">
+              <div class="col-md-6 mb-3">
+                <label class="form-label">Status</label>
+                <select class="form-select" id="pitchStatus">
+                  <option value="pending">Pending</option>
+                  <option value="approved">Approved</option>
+                  <option value="rejected">Rejected</option>
+                </select>
+              </div>
+              <div class="col-md-6 mb-3">
+                <label class="form-label">Voting</label>
+                <select class="form-select" id="pitchVotingOpen">
+                  <option value="false">Closed</option>
+                  <option value="true">Open</option>
+                </select>
+              </div>
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+            <button type="button" class="btn btn-vcf-primary" onclick="window.savePitch()">Save</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Add/Edit Resource Modal -->
+    <div class="modal fade" id="resourceModal" tabindex="-1">
+      <div class="modal-dialog">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h5 class="modal-title" id="resourceModalTitle">Add Resource</h5>
+            <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body">
+            <input type="hidden" id="resourceId" />
+            <div class="mb-3">
+              <label class="form-label">Title</label>
+              <input type="text" class="form-control" id="resourceTitle" required />
+            </div>
+            <div class="mb-3">
+              <label class="form-label">URL</label>
+              <input type="url" class="form-control" id="resourceUrl" required placeholder="https://..." />
+            </div>
+            <div class="mb-3">
+              <label class="form-label">Category</label>
+              <input type="text" class="form-control" id="resourceCategory" required placeholder="e.g., Valuation, Technical Analysis" list="categoryList" />
+              <datalist id="categoryList">
+                ${[...new Set(resources.map(r => r.category))].map(c => `<option value="${c}">`).join('')}
+              </datalist>
+            </div>
+            <div class="mb-3">
+              <label class="form-label">Description</label>
+              <textarea class="form-control" id="resourceDescription" rows="2"></textarea>
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+            <button type="button" class="btn btn-vcf-primary" onclick="window.saveResource()">Save</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Edit Account Modal -->
+    <div class="modal fade" id="editAccountModal" tabindex="-1">
+      <div class="modal-dialog">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h5 class="modal-title">Edit Account</h5>
+            <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body">
+            <input type="hidden" id="editAccountId" />
+            <div class="mb-3">
+              <label class="form-label">Name</label>
+              <input type="text" class="form-control" id="editAccountName" />
+            </div>
+            <div class="mb-3">
+              <label class="form-label">Role</label>
+              <select class="form-select" id="editAccountRole">
+                <option value="investor">Investor</option>
+                <option value="member">Member</option>
+                <option value="admin">Admin</option>
+              </select>
+            </div>
+            <div class="mb-3">
+              <label class="form-label">Units</label>
+              <input type="number" class="form-control" id="editAccountUnits" step="0.01" />
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+            <button type="button" class="btn btn-vcf-primary" onclick="window.saveAccount()">Save</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    ` : ''}
+  `;
+}
+
 function renderLayout() {
   const role = AppState.role;
   const isAdmin = role === 'admin';
@@ -537,10 +778,16 @@ function renderLayout() {
         <!-- Content rendered here -->
       </main>
     </div>
+
+    <!-- Persistent modal container: lives outside #main so tab switches never destroy modals -->
+    <div id="modals-container"></div>
   `;
 
   // Setup event listeners
   setupNavListeners();
+
+  // Render all modals once into the persistent container
+  renderPersistentModals();
 
   // Render current tab
   handleRouteChange();
@@ -643,8 +890,14 @@ function setupNavListeners() {
       e.preventDefault();
       const hash = link.getAttribute('href');
       if (hash && hash !== '#') {
-        window.location.hash = hash;
-        handleRouteChange();
+        const newTab = hash.slice(1);
+        if (AppState.currentTab === newTab) {
+          // Same tab clicked - no hashchange fires, handle directly
+          handleRouteChange();
+        } else {
+          // Let the hashchange event handle routing (avoids double render)
+          window.location.hash = hash;
+        }
       }
     };
   });
@@ -1208,7 +1461,7 @@ function renderMeetingsTab(main) {
       <div class="d-flex justify-content-between align-items-center mb-4">
         <h4 class="mb-0">Meeting History</h4>
         ${isAdmin ? `
-          <button class="btn btn-vcf-primary" data-bs-toggle="modal" data-bs-target="#meetingModal" onclick="window.editMeeting(null)">
+          <button class="btn btn-vcf-primary" onclick="window.editMeeting(null)">
             <i class="bi bi-plus-lg me-1"></i>Add Meeting
           </button>
         ` : ''}
@@ -1263,56 +1516,6 @@ function renderMeetingsTab(main) {
       `}
     </div>
 
-    <!-- Meeting Detail Modal -->
-    <div class="modal fade" id="meetingDetailModal" tabindex="-1">
-      <div class="modal-dialog modal-lg">
-        <div class="modal-content">
-          <div class="modal-header">
-            <h5 class="modal-title" id="meetingDetailTitle">Meeting Details</h5>
-            <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-          </div>
-          <div class="modal-body" id="meetingDetailBody">
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- Add/Edit Meeting Modal -->
-    ${isAdmin ? `
-      <div class="modal fade" id="meetingModal" tabindex="-1">
-        <div class="modal-dialog">
-          <div class="modal-content">
-            <div class="modal-header">
-              <h5 class="modal-title" id="meetingModalTitle">Add Meeting</h5>
-              <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-            </div>
-            <div class="modal-body">
-              <input type="hidden" id="meetingId" />
-              <div class="mb-3">
-                <label class="form-label">Date</label>
-                <input type="date" class="form-control" id="meetingDate" required />
-              </div>
-              <div class="mb-3">
-                <label class="form-label">Title</label>
-                <input type="text" class="form-control" id="meetingTitle" required />
-              </div>
-              <div class="mb-3">
-                <label class="form-label">Notes</label>
-                <textarea class="form-control" id="meetingNotes" rows="4"></textarea>
-              </div>
-              <div class="mb-3">
-                <label class="form-label">Presentation Links (one per line)</label>
-                <textarea class="form-control" id="meetingLinks" rows="2" placeholder="https://..."></textarea>
-              </div>
-            </div>
-            <div class="modal-footer">
-              <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-              <button type="button" class="btn btn-vcf-primary" onclick="window.saveMeeting()">Save</button>
-            </div>
-          </div>
-        </div>
-      </div>
-    ` : ''}
   `;
 
   // Setup global handlers
@@ -1395,7 +1598,7 @@ function renderPitchesTab(main) {
       <div class="d-flex justify-content-between align-items-center mb-4">
         <h4 class="mb-0">Stock Pitches</h4>
         ${isAdmin ? `
-          <button class="btn btn-vcf-primary" data-bs-toggle="modal" data-bs-target="#pitchModal" onclick="window.editPitch(null)">
+          <button class="btn btn-vcf-primary" onclick="window.editPitch(null)">
             <i class="bi bi-plus-lg me-1"></i>Add Pitch
           </button>
         ` : ''}
@@ -1505,75 +1708,6 @@ function renderPitchesTab(main) {
       `}
     </div>
 
-    <!-- Add/Edit Pitch Modal -->
-    ${isAdmin ? `
-      <div class="modal fade" id="pitchModal" tabindex="-1">
-        <div class="modal-dialog modal-lg">
-          <div class="modal-content">
-            <div class="modal-header">
-              <h5 class="modal-title" id="pitchModalTitle">Add Pitch</h5>
-              <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-            </div>
-            <div class="modal-body">
-              <input type="hidden" id="pitchId" />
-              <div class="row">
-                <div class="col-md-6 mb-3">
-                  <label class="form-label">Ticker</label>
-                  <input type="text" class="form-control" id="pitchTicker" required placeholder="AAPL" />
-                </div>
-                <div class="col-md-6 mb-3">
-                  <label class="form-label">Pitched By</label>
-                  <input type="text" class="form-control" id="pitchBy" required />
-                </div>
-              </div>
-              <div class="row">
-                <div class="col-md-6 mb-3">
-                  <label class="form-label">Pitch Date</label>
-                  <input type="date" class="form-control" id="pitchDate" required />
-                </div>
-                <div class="col-md-6 mb-3">
-                  <label class="form-label">Sector</label>
-                  <input type="text" class="form-control" id="pitchSector" placeholder="Technology" />
-                </div>
-              </div>
-              <div class="mb-3">
-                <label class="form-label">Summary</label>
-                <textarea class="form-control" id="pitchSummary" rows="2"></textarea>
-              </div>
-              <div class="mb-3">
-                <label class="form-label">Thesis</label>
-                <textarea class="form-control" id="pitchThesis" rows="4"></textarea>
-              </div>
-              <div class="mb-3">
-                <label class="form-label">Slideshow URL</label>
-                <input type="url" class="form-control" id="pitchSlideshow" placeholder="https://..." />
-              </div>
-              <div class="row">
-                <div class="col-md-6 mb-3">
-                  <label class="form-label">Status</label>
-                  <select class="form-select" id="pitchStatus">
-                    <option value="pending">Pending</option>
-                    <option value="approved">Approved</option>
-                    <option value="rejected">Rejected</option>
-                  </select>
-                </div>
-                <div class="col-md-6 mb-3">
-                  <label class="form-label">Voting</label>
-                  <select class="form-select" id="pitchVotingOpen">
-                    <option value="false">Closed</option>
-                    <option value="true">Open</option>
-                  </select>
-                </div>
-              </div>
-            </div>
-            <div class="modal-footer">
-              <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-              <button type="button" class="btn btn-vcf-primary" onclick="window.savePitch()">Save</button>
-            </div>
-          </div>
-        </div>
-      </div>
-    ` : ''}
   `;
 
   // Setup global handlers
@@ -1875,11 +2009,7 @@ function renderChatMessages(messages) {
 
   messages.forEach((msg, index) => {
     const isNewUser = msg.user_id !== lastUserId;
-    const time = new Date(msg.created_at).toLocaleTimeString('en-US', {
-      hour: 'numeric',
-      minute: '2-digit',
-      hour12: true
-    });
+    const time = formatChatTimestamp(msg.created_at);
 
     if (isNewUser) {
       const avatar = msg.user_avatar
@@ -1971,11 +2101,7 @@ function appendChatMessage(message) {
   const prevMessage = messages.length > 1 ? messages[messages.length - 2] : null;
   const isNewUser = !prevMessage || prevMessage.user_id !== message.user_id;
 
-  const time = new Date(message.created_at).toLocaleTimeString('en-US', {
-    hour: 'numeric',
-    minute: '2-digit',
-    hour12: true
-  });
+  const time = formatChatTimestamp(message.created_at);
 
   // Remove empty state if present
   const emptyState = messagesContainer.querySelector('.text-center.text-muted');
@@ -2058,7 +2184,7 @@ function renderResourcesTab(main) {
       <div class="d-flex justify-content-between align-items-center mb-4">
         <h4 class="mb-0">Educational Resources</h4>
         ${isAdmin ? `
-          <button class="btn btn-vcf-primary" data-bs-toggle="modal" data-bs-target="#resourceModal" onclick="window.editResource(null)">
+          <button class="btn btn-vcf-primary" onclick="window.editResource(null)">
             <i class="bi bi-plus-lg me-1"></i>Add Resource
           </button>
         ` : ''}
@@ -2108,45 +2234,6 @@ function renderResourcesTab(main) {
       `}
     </div>
 
-    <!-- Add/Edit Resource Modal -->
-    ${isAdmin ? `
-      <div class="modal fade" id="resourceModal" tabindex="-1">
-        <div class="modal-dialog">
-          <div class="modal-content">
-            <div class="modal-header">
-              <h5 class="modal-title" id="resourceModalTitle">Add Resource</h5>
-              <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-            </div>
-            <div class="modal-body">
-              <input type="hidden" id="resourceId" />
-              <div class="mb-3">
-                <label class="form-label">Title</label>
-                <input type="text" class="form-control" id="resourceTitle" required />
-              </div>
-              <div class="mb-3">
-                <label class="form-label">URL</label>
-                <input type="url" class="form-control" id="resourceUrl" required placeholder="https://..." />
-              </div>
-              <div class="mb-3">
-                <label class="form-label">Category</label>
-                <input type="text" class="form-control" id="resourceCategory" required placeholder="e.g., Valuation, Technical Analysis" list="categoryList" />
-                <datalist id="categoryList">
-                  ${[...new Set(resources.map(r => r.category))].map(c => `<option value="${c}">`).join('')}
-                </datalist>
-              </div>
-              <div class="mb-3">
-                <label class="form-label">Description</label>
-                <textarea class="form-control" id="resourceDescription" rows="2"></textarea>
-              </div>
-            </div>
-            <div class="modal-footer">
-              <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-              <button type="button" class="btn btn-vcf-primary" onclick="window.saveResource()">Save</button>
-            </div>
-          </div>
-        </div>
-      </div>
-    ` : ''}
   `;
 
   // Setup global handlers
@@ -2288,42 +2375,6 @@ function renderAccountTab(main) {
       </div>
     </div>
 
-    <!-- Edit Account Modal (Admin) -->
-    ${isAdmin ? `
-      <div class="modal fade" id="editAccountModal" tabindex="-1">
-        <div class="modal-dialog">
-          <div class="modal-content">
-            <div class="modal-header">
-              <h5 class="modal-title">Edit Account</h5>
-              <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-            </div>
-            <div class="modal-body">
-              <input type="hidden" id="editAccountId" />
-              <div class="mb-3">
-                <label class="form-label">Name</label>
-                <input type="text" class="form-control" id="editAccountName" />
-              </div>
-              <div class="mb-3">
-                <label class="form-label">Role</label>
-                <select class="form-select" id="editAccountRole">
-                  <option value="investor">Investor</option>
-                  <option value="member">Member</option>
-                  <option value="admin">Admin</option>
-                </select>
-              </div>
-              <div class="mb-3">
-                <label class="form-label">Units</label>
-                <input type="number" class="form-control" id="editAccountUnits" step="0.01" />
-              </div>
-            </div>
-            <div class="modal-footer">
-              <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-              <button type="button" class="btn btn-vcf-primary" onclick="window.saveAccount()">Save</button>
-            </div>
-          </div>
-        </div>
-      </div>
-    ` : ''}
   `;
 
   // Setup profile picture upload
@@ -2882,6 +2933,7 @@ function downloadCSV(rows, filename) {
 // ============================================
 
 let isInitializing = false;
+let appReady = false; // true once the layout has been fully rendered
 
 async function init() {
   // Prevent double initialization
@@ -2895,7 +2947,24 @@ async function init() {
     const hasSession = await checkSession();
 
     if (!hasSession) {
+      appReady = false;
       renderLogin();
+      return;
+    }
+
+    // If the app is already fully rendered (e.g. a spurious SIGNED_IN event fired),
+    // just silently refresh data in the background without touching the DOM.
+    if (appReady && document.getElementById('main')) {
+      await loadAllData();
+      AppState.account = AppState.accounts.find(a => a.owner_user_id === AppState.user.id);
+      if (AppState.account) {
+        AppState.role = AppState.account.role || 'investor';
+        AppState.myBalance = (Number(AppState.account.units) || 0) * (AppState.nav || 0);
+        // Only re-render the tab if no modal is open
+        if (!document.querySelector('.modal.show')) {
+          renderCurrentTab();
+        }
+      }
       return;
     }
 
@@ -2914,8 +2983,10 @@ async function init() {
     AppState.role = AppState.account.role || 'investor';
     AppState.myBalance = (Number(AppState.account.units) || 0) * (AppState.nav || 0);
 
-    // Render layout
+    // Render layout (only happens once after login)
+    appReady = false;
     renderLayout();
+    appReady = true;
 
   } catch (error) {
     console.error('Error initializing app:', error);
@@ -2933,8 +3004,11 @@ async function init() {
 
 // Auth state change listener
 supa.auth.onAuthStateChange((event, session) => {
-  // Only re-init on sign in/out events, not on initial load
-  if (event === 'SIGNED_IN' || event === 'SIGNED_OUT') {
+  if (event === 'SIGNED_OUT') {
+    appReady = false;
+    init();
+  } else if (event === 'SIGNED_IN' && !appReady) {
+    // Only do a full init on SIGNED_IN if not already running
     init();
   }
 });
@@ -2949,9 +3023,10 @@ window.addEventListener('hashchange', () => {
 // Start app
 init();
 
-// Auto-refresh data every 2 minutes
+// Auto-refresh data every 2 minutes (skip if a modal is open to avoid losing user input)
 setInterval(async () => {
   if (AppState.user && AppState.account) {
+    if (document.querySelector('.modal.show')) return;
     await loadAllData();
     renderCurrentTab();
   }
