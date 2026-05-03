@@ -30,6 +30,7 @@ const AppState = {
   votes: [],
   resources: [],
   benchmarkData: [],
+  watchlist: [],
 
   // Enriched data
   enrichedHoldings: [],
@@ -146,6 +147,43 @@ function isVotingEligible(account, nav) {
 // API FUNCTIONS
 // ============================================
 
+// Direct uncached fetch for a single symbol — used when we need a real-time
+// snapshot (e.g., entry price when adding to the watchlist).
+async function fetchSinglePrice(symbol) {
+  if (symbol === "CASH") return { price: 1, prevClose: 1 };
+
+  try {
+    const res = await fetch(
+      `https://finnhub.io/api/v1/quote?symbol=${symbol}&token=${FINNHUB_KEY}`
+    );
+    if (!res.ok) {
+      console.warn(`API error for ${symbol}: ${res.status}`);
+      return null;
+    }
+    const data = await res.json();
+    if (data && typeof data.c === 'number' && data.c > 0) {
+      return { price: data.c, prevClose: data.pc || data.c };
+    }
+    console.warn(`Invalid price data for ${symbol}:`, data);
+    return null;
+  } catch (e) {
+    console.error(`Error fetching price for ${symbol}:`, e);
+    return null;
+  }
+}
+
+// Persist the current price cache to AppState + localStorage.
+function persistPriceCache(results, fetchTime) {
+  AppState.priceCache = results;
+  AppState.lastPriceFetch = fetchTime;
+  try {
+    localStorage.setItem('vcf_price_cache', JSON.stringify(results));
+    localStorage.setItem('vcf_price_cache_time', fetchTime.toString());
+  } catch (e) {
+    console.warn('Could not save price cache to localStorage');
+  }
+}
+
 async function fetchPrices(symbols) {
   const now = Date.now();
   const CACHE_KEY = 'vcf_price_cache';
@@ -165,10 +203,32 @@ async function fetchPrices(symbols) {
     }
   }
 
-  // Reuse prices for 5 minutes to avoid rate limiting
-  if (AppState.priceCache && now - AppState.lastPriceFetch < 300_000) {
-    console.log('Using cached prices (age: ' + Math.round((now - AppState.lastPriceFetch) / 1000) + 's)');
-    return AppState.priceCache;
+  const cacheFresh = AppState.priceCache && now - AppState.lastPriceFetch < 300_000;
+
+  // If cache is fresh, top up any symbols that aren't in it yet (e.g. a newly
+  // added watchlist ticker) instead of returning stale-but-incomplete data.
+  if (cacheFresh) {
+    const missing = symbols.filter(s => !AppState.priceCache[s]);
+    if (missing.length === 0) {
+      console.log('Using cached prices (age: ' + Math.round((now - AppState.lastPriceFetch) / 1000) + 's)');
+      return AppState.priceCache;
+    }
+    console.log('Cache fresh but missing symbols, topping up:', missing);
+    const results = { ...AppState.priceCache };
+    const fetched = await Promise.all(missing.map(async (sym) => {
+      const data = await fetchSinglePrice(sym);
+      return { sym, ...(data || { price: null, prevClose: null }) };
+    }));
+    for (const { sym, price, prevClose } of fetched) {
+      if (price !== null && price > 0) {
+        results[sym] = { price, prevClose };
+      } else if (!results[sym]) {
+        results[sym] = { price: 0, prevClose: 0 };
+      }
+    }
+    // Don't reset lastPriceFetch — only added missing symbols, original cache age preserved.
+    persistPriceCache(results, AppState.lastPriceFetch);
+    return results;
   }
 
   console.log('Fetching fresh prices for:', symbols);
@@ -177,37 +237,11 @@ async function fetchPrices(symbols) {
   const results = { ...(AppState.priceCache || {}) };
 
   // Fetch all prices in parallel to beat rate limit
-  const fetchPromises = symbols.map(async (sym) => {
-    if (sym === "CASH") {
-      return { sym, price: 1, prevClose: 1 };
-    }
-
-    try {
-      const res = await fetch(
-        `https://finnhub.io/api/v1/quote?symbol=${sym}&token=${FINNHUB_KEY}`
-      );
-
-      if (!res.ok) {
-        console.warn(`API error for ${sym}: ${res.status}`);
-        return { sym, price: null, prevClose: null };
-      }
-
-      const data = await res.json();
-
-      if (data && typeof data.c === 'number' && data.c > 0) {
-        console.log(`${sym}: $${data.c} (prev: $${data.pc})`);
-        return { sym, price: data.c, prevClose: data.pc || data.c };
-      } else {
-        console.warn(`Invalid price data for ${sym}:`, data);
-        return { sym, price: null, prevClose: null };
-      }
-    } catch (e) {
-      console.error(`Error fetching price for ${sym}:`, e);
-      return { sym, price: null, prevClose: null };
-    }
-  });
-
-  const fetchResults = await Promise.all(fetchPromises);
+  const fetchResults = await Promise.all(symbols.map(async (sym) => {
+    const data = await fetchSinglePrice(sym);
+    if (data) console.log(`${sym}: $${data.price} (prev: $${data.prevClose})`);
+    return { sym, ...(data || { price: null, prevClose: null }) };
+  }));
 
   // Merge results - only update if we got valid data
   for (const { sym, price, prevClose } of fetchResults) {
@@ -220,17 +254,7 @@ async function fetchPrices(symbols) {
     // else: keep existing cached price
   }
 
-  AppState.priceCache = results;
-  AppState.lastPriceFetch = now;
-
-  // Save to localStorage for persistence across refreshes
-  try {
-    localStorage.setItem(CACHE_KEY, JSON.stringify(results));
-    localStorage.setItem(CACHE_TIME_KEY, now.toString());
-  } catch (e) {
-    console.warn('Could not save price cache to localStorage');
-  }
-
+  persistPriceCache(results, now);
   return results;
 }
 
@@ -243,7 +267,8 @@ async function loadAllData() {
     { data: votes },
     { data: resources },
     { data: benchmarkData },
-    { data: channels }
+    { data: channels },
+    { data: watchlist }
   ] = await Promise.all([
     supa.from("accounts").select("*"),
     supa.from("holdings").select("*"),
@@ -252,7 +277,8 @@ async function loadAllData() {
     supa.from("votes").select("*"),
     supa.from("resources").select("*").order('category'),
     supa.from("benchmark_data").select("*").order('date'),
-    supa.from("channels").select("*").order('created_at')
+    supa.from("channels").select("*").order('created_at'),
+    supa.from("watchlist").select("*").order('created_at', { ascending: false })
   ]);
 
   AppState.accounts = accounts || [];
@@ -263,9 +289,13 @@ async function loadAllData() {
   AppState.resources = resources || [];
   AppState.benchmarkData = benchmarkData || [];
   AppState.channels = channels || [];
+  AppState.watchlist = watchlist || [];
 
-  // Enrich holdings with prices
-  const symbols = [...new Set(AppState.holdings.map(h => h.symbol))];
+  // Enrich holdings with prices (also fetch watchlist tickers so current prices stay live)
+  const symbols = [...new Set([
+    ...AppState.holdings.map(h => h.symbol),
+    ...AppState.watchlist.map(w => w.ticker)
+  ])];
   const prices = await fetchPrices(symbols);
 
   AppState.enrichedHoldings = AppState.holdings.map(h => {
@@ -535,6 +565,7 @@ function renderPersistentModals() {
   if (!container) return;
 
   const isAdmin = AppState.role === 'admin';
+  const isMember = AppState.role === 'member' || isAdmin;
   const resources = AppState.resources;
 
   container.innerHTML = `
@@ -728,6 +759,49 @@ function renderPersistentModals() {
       </div>
     </div>
     ` : ''}
+
+    ${isMember ? `
+    <!-- Add/Edit Watchlist Modal -->
+    <div class="modal fade" id="watchlistModal" tabindex="-1">
+      <div class="modal-dialog">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h5 class="modal-title" id="watchlistModalTitle">Add to Watchlist</h5>
+            <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body">
+            <input type="hidden" id="watchlistId" />
+            <div class="mb-3">
+              <label class="form-label">Ticker</label>
+              <input type="text" class="form-control text-uppercase" id="watchlistTicker" required placeholder="AAPL" />
+              <div class="form-text">Symbol cannot be changed after adding.</div>
+            </div>
+            <div class="mb-3">
+              <label class="form-label">Notes</label>
+              <textarea class="form-control" id="watchlistNotes" rows="5" placeholder="Why are you tracking this stock?"></textarea>
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+            <button type="button" class="btn btn-vcf-primary" onclick="window.saveWatchlist()">Save</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Watchlist Detail / Notes Modal -->
+    <div class="modal fade" id="watchlistDetailModal" tabindex="-1">
+      <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h5 class="modal-title" id="watchlistDetailTitle">Watchlist Entry</h5>
+            <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body" id="watchlistDetailBody"></div>
+        </div>
+      </div>
+    </div>
+    ` : ''}
   `;
 }
 
@@ -809,6 +883,7 @@ function getNavItems(role, showAdminTabs) {
     items += navItem('analytics', 'graph-up', 'Analytics');
     items += navItem('meetings', 'calendar-event', 'Meeting History');
     items += navItem('pitches', 'lightbulb', 'Stock Pitches');
+    items += navItem('watchlist', 'bookmark-star', 'Watchlist');
     items += navItem('chat', 'chat-dots', 'Chat');
     items += navItem('resources', 'book', 'Educational Resources');
     items += navItem('account', 'person-circle', 'Account Management');
@@ -927,7 +1002,7 @@ function renderCurrentTab() {
   }
 
   // Check permissions
-  const memberTabs = ['analytics', 'meetings', 'pitches', 'chat', 'resources', 'account'];
+  const memberTabs = ['analytics', 'meetings', 'pitches', 'watchlist', 'chat', 'resources', 'account'];
   const adminTabs = ['votes', 'data-tools'];
 
   if (memberTabs.includes(tab) && !isMember) {
@@ -952,6 +1027,9 @@ function renderCurrentTab() {
       break;
     case 'pitches':
       renderPitchesTab(main);
+      break;
+    case 'watchlist':
+      renderWatchlistTab(main);
       break;
     case 'chat':
       renderChatTab(main);
@@ -1797,6 +1875,274 @@ function getStatusBadgeColor(status) {
     case 'rejected': return 'danger';
     default: return 'warning';
   }
+}
+
+// ============================================
+// TAB: WATCHLIST
+// ============================================
+
+function getYahooFinanceUrl(ticker) {
+  return `https://finance.yahoo.com/quote/${encodeURIComponent(ticker)}/`;
+}
+
+function renderWatchlistTab(main) {
+  const { watchlist, role, account, priceCache } = AppState;
+  const isAdmin = role === 'admin';
+  const myUserId = AppState.user?.id;
+
+  const rows = watchlist.map(w => {
+    const priceObj = (priceCache || {})[w.ticker] || { price: 0 };
+    const currentPrice = Number(priceObj.price) || 0;
+    const addedPrice = Number(w.added_price) || 0;
+    const changeDollar = currentPrice && addedPrice ? currentPrice - addedPrice : 0;
+    const changePct = addedPrice > 0 ? changeDollar / addedPrice : 0;
+    const canEdit = isAdmin || w.added_by_user_id === myUserId;
+    return { ...w, currentPrice, addedPrice, changeDollar, changePct, canEdit };
+  });
+
+  main.innerHTML = `
+    <div class="container-fluid py-4">
+      <div class="d-flex justify-content-between align-items-center mb-4">
+        <div>
+          <h4 class="mb-0">Watchlist</h4>
+          <small class="text-muted">Tickers tracked by members of the fund.</small>
+        </div>
+        <button class="btn btn-vcf-primary" onclick="window.editWatchlist(null)">
+          <i class="bi bi-plus-lg me-1"></i>Add Ticker
+        </button>
+      </div>
+
+      ${rows.length === 0 ? `
+        <div class="text-center text-muted py-5">
+          <i class="bi bi-bookmark-star fs-1 mb-3 d-block"></i>
+          <p>No tickers on the watchlist yet.</p>
+        </div>
+      ` : `
+        <div class="card">
+          <div class="card-body p-0">
+            <div class="table-responsive">
+              <table class="table table-hover mb-0 align-middle">
+                <thead>
+                  <tr>
+                    <th>Ticker</th>
+                    <th>Added By</th>
+                    <th>Date Added</th>
+                    <th class="text-end">Entry Price</th>
+                    <th class="text-end">Current</th>
+                    <th class="text-end">Change</th>
+                    <th>Notes</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${rows.map(w => {
+                    const notesPreview = w.notes ? (w.notes.length > 60 ? w.notes.slice(0, 60) + '…' : w.notes) : '';
+                    const changeColor = w.changeDollar > 0 ? 'text-success' : w.changeDollar < 0 ? 'text-danger' : 'text-muted';
+                    const sign = w.changeDollar > 0 ? '+' : '';
+                    return `
+                      <tr>
+                        <td>
+                          <a href="${getYahooFinanceUrl(w.ticker)}" target="_blank" rel="noopener noreferrer" class="text-decoration-none fw-semibold">
+                            ${escapeHtml(w.ticker)}
+                            <i class="bi bi-box-arrow-up-right small ms-1"></i>
+                          </a>
+                        </td>
+                        <td>${escapeHtml(w.added_by_name)}</td>
+                        <td><small class="text-muted">${formatDate(w.created_at?.slice(0, 10))}</small></td>
+                        <td class="text-end">${w.addedPrice > 0 ? formatCurrency(w.addedPrice) : '<span class="text-muted">—</span>'}</td>
+                        <td class="text-end">${w.currentPrice > 0 ? formatCurrency(w.currentPrice) : '<span class="text-muted">—</span>'}</td>
+                        <td class="text-end ${changeColor}">
+                          ${w.addedPrice > 0 && w.currentPrice > 0 ? `
+                            <div class="fw-semibold">${sign}${formatCurrency(w.changeDollar)}</div>
+                            <small>${sign}${formatPercent(w.changePct)}</small>
+                          ` : '<span class="text-muted">—</span>'}
+                        </td>
+                        <td>
+                          <button class="btn btn-link p-0 text-start small text-muted" onclick="window.viewWatchlist('${w.id}')" title="View / edit notes">
+                            ${notesPreview ? escapeHtml(notesPreview) : '<em>No notes</em>'}
+                          </button>
+                        </td>
+                        <td class="text-end">
+                          <div class="dropdown">
+                            <button class="btn btn-sm btn-link text-muted" data-bs-toggle="dropdown">
+                              <i class="bi bi-three-dots-vertical"></i>
+                            </button>
+                            <ul class="dropdown-menu dropdown-menu-end">
+                              <li><a class="dropdown-item" href="${getYahooFinanceUrl(w.ticker)}" target="_blank" rel="noopener noreferrer">Open in Yahoo Finance</a></li>
+                              <li><a class="dropdown-item" href="#" onclick="window.viewWatchlist('${w.id}'); return false;">View notes</a></li>
+                              ${w.canEdit ? `
+                                <li><hr class="dropdown-divider"></li>
+                                <li><a class="dropdown-item" href="#" onclick="window.editWatchlist('${w.id}'); return false;">Edit notes</a></li>
+                                <li><a class="dropdown-item text-danger" href="#" onclick="window.deleteWatchlist('${w.id}'); return false;">Delete</a></li>
+                              ` : ''}
+                            </ul>
+                          </div>
+                        </td>
+                      </tr>
+                    `;
+                  }).join('')}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      `}
+    </div>
+  `;
+
+  // Bootstrap's default Popper strategy ("absolute") gets clipped by the
+  // .table-responsive overflow context. Re-init each dropdown with a fixed
+  // strategy so the menu can escape the table.
+  main.querySelectorAll('[data-bs-toggle="dropdown"]').forEach(el => {
+    bootstrap.Dropdown.getInstance(el)?.dispose();
+    new bootstrap.Dropdown(el, { popperConfig: (cfg) => ({ ...cfg, strategy: 'fixed' }) });
+  });
+
+  // ----- Handlers -----
+
+  window.editWatchlist = (id) => {
+    const entry = id ? AppState.watchlist.find(w => w.id === id) : null;
+
+    document.getElementById('watchlistModalTitle').textContent = entry ? 'Edit Watchlist Entry' : 'Add to Watchlist';
+    document.getElementById('watchlistId').value = id || '';
+
+    const tickerInput = document.getElementById('watchlistTicker');
+    tickerInput.value = entry?.ticker || '';
+    tickerInput.disabled = !!entry; // ticker is fixed once added
+
+    document.getElementById('watchlistNotes').value = entry?.notes || '';
+
+    const modalEl = document.getElementById('watchlistModal');
+    const modal = bootstrap.Modal.getInstance(modalEl) || new bootstrap.Modal(modalEl);
+    modal.show();
+  };
+
+  window.saveWatchlist = async () => {
+    const id = document.getElementById('watchlistId').value;
+    const tickerRaw = document.getElementById('watchlistTicker').value.trim().toUpperCase();
+    const notes = document.getElementById('watchlistNotes').value.trim() || null;
+
+    if (id) {
+      // Editing — only notes can change
+      const { error } = await supa.from('watchlist').update({ notes }).eq('id', id);
+      if (error) {
+        alert('Error saving entry: ' + error.message);
+        return;
+      }
+    } else {
+      if (!tickerRaw) {
+        alert('Ticker is required.');
+        return;
+      }
+
+      // Snapshot the live price at the moment of adding — bypass the cache
+      // so the entry price reflects "now" rather than a 5-minute-old quote.
+      const live = await fetchSinglePrice(tickerRaw);
+      if (!live) {
+        alert(`Could not fetch a live price for "${tickerRaw}". Check the ticker symbol.`);
+        return;
+      }
+
+      // Seed the in-memory cache so the current price column renders right away.
+      if (AppState.priceCache) {
+        AppState.priceCache[tickerRaw] = live;
+      }
+
+      const { error } = await supa.from('watchlist').insert({
+        ticker: tickerRaw,
+        added_by_user_id: AppState.user.id,
+        added_by_name: AppState.account?.name || AppState.user.email || 'Unknown',
+        added_price: live.price,
+        notes
+      });
+
+      if (error) {
+        alert('Error adding ticker: ' + error.message);
+        return;
+      }
+    }
+
+    bootstrap.Modal.getInstance(document.getElementById('watchlistModal')).hide();
+    await loadAllData();
+    renderWatchlistTab(document.getElementById('main'));
+  };
+
+  window.deleteWatchlist = async (id) => {
+    if (!confirm('Remove this ticker from the watchlist?')) return;
+    const { error } = await supa.from('watchlist').delete().eq('id', id);
+    if (error) {
+      alert('Error deleting entry: ' + error.message);
+      return;
+    }
+    await loadAllData();
+    renderWatchlistTab(document.getElementById('main'));
+  };
+
+  window.viewWatchlist = (id) => {
+    const w = AppState.watchlist.find(x => x.id === id);
+    if (!w) return;
+
+    const priceObj = (AppState.priceCache || {})[w.ticker] || { price: 0 };
+    const currentPrice = Number(priceObj.price) || 0;
+    const addedPrice = Number(w.added_price) || 0;
+    const changeDollar = currentPrice && addedPrice ? currentPrice - addedPrice : 0;
+    const changePct = addedPrice > 0 ? changeDollar / addedPrice : 0;
+    const sign = changeDollar > 0 ? '+' : '';
+    const changeColor = changeDollar > 0 ? 'text-success' : changeDollar < 0 ? 'text-danger' : 'text-muted';
+    const canEdit = AppState.role === 'admin' || w.added_by_user_id === AppState.user?.id;
+
+    document.getElementById('watchlistDetailTitle').innerHTML = `
+      <a href="${getYahooFinanceUrl(w.ticker)}" target="_blank" rel="noopener noreferrer" class="text-decoration-none">
+        ${escapeHtml(w.ticker)} <i class="bi bi-box-arrow-up-right small"></i>
+      </a>
+    `;
+
+    document.getElementById('watchlistDetailBody').innerHTML = `
+      <div class="row mb-3">
+        <div class="col-md-6">
+          <div class="text-muted small">Added by</div>
+          <div class="fw-semibold">${escapeHtml(w.added_by_name)}</div>
+        </div>
+        <div class="col-md-6">
+          <div class="text-muted small">Date added</div>
+          <div class="fw-semibold">${formatDate(w.created_at?.slice(0, 10))}</div>
+        </div>
+      </div>
+      <div class="row mb-3">
+        <div class="col-md-4">
+          <div class="text-muted small">Entry price</div>
+          <div class="fw-semibold">${addedPrice > 0 ? formatCurrency(addedPrice) : '—'}</div>
+        </div>
+        <div class="col-md-4">
+          <div class="text-muted small">Current price</div>
+          <div class="fw-semibold">${currentPrice > 0 ? formatCurrency(currentPrice) : '—'}</div>
+        </div>
+        <div class="col-md-4">
+          <div class="text-muted small">Change since added</div>
+          <div class="fw-semibold ${changeColor}">
+            ${addedPrice > 0 && currentPrice > 0 ? `${sign}${formatCurrency(changeDollar)} (${sign}${formatPercent(changePct)})` : '—'}
+          </div>
+        </div>
+      </div>
+      <hr />
+      <div class="text-muted small mb-1">Notes</div>
+      <p class="mb-3" style="white-space: pre-wrap;">${w.notes ? escapeHtml(w.notes) : '<em class="text-muted">No notes yet.</em>'}</p>
+      ${canEdit ? `
+        <div class="d-flex gap-2">
+          <button class="btn btn-sm btn-outline-primary" onclick="bootstrap.Modal.getInstance(document.getElementById('watchlistDetailModal')).hide(); window.editWatchlist('${w.id}');">
+            <i class="bi bi-pencil me-1"></i>Edit notes
+          </button>
+          <button class="btn btn-sm btn-outline-danger" onclick="bootstrap.Modal.getInstance(document.getElementById('watchlistDetailModal')).hide(); window.deleteWatchlist('${w.id}');">
+            <i class="bi bi-trash me-1"></i>Delete
+          </button>
+        </div>
+      ` : ''}
+    `;
+
+    const modalEl = document.getElementById('watchlistDetailModal');
+    const modal = bootstrap.Modal.getInstance(modalEl) || new bootstrap.Modal(modalEl);
+    modal.show();
+  };
 }
 
 // ============================================

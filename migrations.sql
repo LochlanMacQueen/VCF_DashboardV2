@@ -373,3 +373,71 @@ CREATE POLICY "Users can delete own messages" ON messages
 
 -- Enable Realtime for messages table
 ALTER PUBLICATION supabase_realtime ADD TABLE messages;
+
+-- ============================================
+-- PHASE 6: WATCHLIST FEATURE
+-- ============================================
+
+CREATE TABLE IF NOT EXISTS watchlist (
+    id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+    ticker TEXT NOT NULL,
+    added_by_user_id UUID REFERENCES auth.users(id),
+    added_by_name TEXT NOT NULL,
+    added_price DECIMAL(12, 4),
+    notes TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_watchlist_ticker ON watchlist(ticker);
+CREATE INDEX IF NOT EXISTS idx_watchlist_created ON watchlist(created_at DESC);
+
+ALTER TABLE watchlist ENABLE ROW LEVEL SECURITY;
+
+-- Members and admins can view all watchlist entries
+CREATE POLICY "Members and admins can view watchlist" ON watchlist
+    FOR SELECT USING (
+        EXISTS (
+            SELECT 1 FROM accounts
+            WHERE owner_user_id = auth.uid()
+            AND role IN ('member', 'admin')
+        )
+    );
+
+-- Members and admins can add watchlist entries (must be themselves)
+CREATE POLICY "Members and admins can insert watchlist" ON watchlist
+    FOR INSERT WITH CHECK (
+        added_by_user_id = auth.uid() AND
+        EXISTS (
+            SELECT 1 FROM accounts
+            WHERE owner_user_id = auth.uid()
+            AND role IN ('member', 'admin')
+        )
+    );
+
+-- Users can update their own entries
+CREATE POLICY "Users can update own watchlist entries" ON watchlist
+    FOR UPDATE USING (added_by_user_id = auth.uid());
+
+-- Admins can update any entry
+CREATE POLICY "Admins can update any watchlist entry" ON watchlist
+    FOR UPDATE USING (
+        EXISTS (
+            SELECT 1 FROM accounts
+            WHERE owner_user_id = auth.uid()
+            AND role = 'admin'
+        )
+    );
+
+-- Users can delete their own entries
+CREATE POLICY "Users can delete own watchlist entries" ON watchlist
+    FOR DELETE USING (added_by_user_id = auth.uid());
+
+-- Admins can delete any entry
+CREATE POLICY "Admins can delete any watchlist entry" ON watchlist
+    FOR DELETE USING (
+        EXISTS (
+            SELECT 1 FROM accounts
+            WHERE owner_user_id = auth.uid()
+            AND role = 'admin'
+        )
+    );
